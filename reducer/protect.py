@@ -31,7 +31,7 @@ def _merge_overlaps(spans: list[Span]) -> list[Span]:
     merged = [spans[0]]
     for span in spans[1:]:
         last = merged[-1]
-        if span.start <= last.end:
+        if span.start <= last.end and span.label == last.label:
             if span.end > last.end:
                 merged[-1] = Span(last.start, span.end, last.label, last.text)
         else:
