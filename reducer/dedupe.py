@@ -1,21 +1,37 @@
 from .config import Config
 from .schemas import Unit
+from .tokenize import lexical_tokens, shingle_set
 
 
 def dedupe_units(units: list[Unit], cfg: Config) -> list[Unit]:
+    if not units:
+        return units
+
+    ranked = sorted(units, key=lambda unit: unit.raw_score, reverse=True)
     kept: list[Unit] = []
-    for u in units:
-        words = u.text.lower().split()
-        sh = set(" ".join(words[i : i + 5]) for i in range(max(0, len(words) - 4)))
-        duplicate = False
-        for k in kept:
-            kw = k.text.lower().split()
-            kh = set(" ".join(kw[i : i + 5]) for i in range(max(0, len(kw) - 4)))
-            union = len(sh | kh) or 1
-            jac = len(sh & kh) / union
-            if jac >= cfg.dedupe_hard and u.raw_score <= k.raw_score:
-                duplicate = True
+    kept_shingles: list[set[str]] = []
+
+    for unit in ranked:
+        shingles = shingle_set(lexical_tokens(unit.text), cfg.shingle_size)
+        hard_duplicate = False
+        soft_duplicate = False
+
+        for existing in kept_shingles:
+            union = len(shingles | existing) or 1
+            resemblance = len(shingles & existing) / union
+            if resemblance >= cfg.dedupe_hard:
+                hard_duplicate = True
                 break
-        if not duplicate:
-            kept.append(u)
+            if resemblance >= cfg.dedupe_soft:
+                soft_duplicate = True
+
+        if hard_duplicate:
+            continue
+
+        if soft_duplicate:
+            unit.features["soft_duplicate"] = 1.0
+        kept.append(unit)
+        kept_shingles.append(shingles)
+
+    kept.sort(key=lambda unit: (unit.start, unit.end))
     return kept

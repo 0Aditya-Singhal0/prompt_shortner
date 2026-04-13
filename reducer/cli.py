@@ -11,6 +11,13 @@ def main() -> None:
     parser.add_argument("--input", type=str, help="Input text file path")
     parser.add_argument("--keep-ratio", type=float, default=0.70)
     parser.add_argument("--strict-mode", action="store_true")
+    parser.add_argument(
+        "--domain",
+        type=str,
+        choices=["general", "coding", "tool_use", "data", "legal_like"],
+        default="general",
+    )
+    parser.add_argument("--disable-output-normalizer", action="store_true")
     args = parser.parse_args()
 
     if args.input:
@@ -19,7 +26,12 @@ def main() -> None:
     else:
         text = input("Prompt> ")
 
-    cfg = Config(keep_ratio=args.keep_ratio, strict_mode=args.strict_mode)
+    cfg = Config(
+        keep_ratio=args.keep_ratio,
+        strict_mode=args.strict_mode,
+        domain=args.domain,
+        use_output_normalizer=not args.disable_output_normalizer,
+    )
     result = compress_prompt(text, cfg)
     print(json.dumps(asdict(result), indent=2))
 
