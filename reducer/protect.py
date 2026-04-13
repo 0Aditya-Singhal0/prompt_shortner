@@ -13,7 +13,6 @@ class _PatternSpec:
 
 
 _PATTERNS: tuple[_PatternSpec, ...] = (
-    _PatternSpec("CODE_BLOCK", re.compile(r"(```|~~~)[\s\S]*?\1", re.MULTILINE), 100),
     _PatternSpec("INLINE_CODE", re.compile(r"`[^`\n]+`"), 96),
     _PatternSpec("URL", re.compile(r"https?://[^\s)\]>]+"), 92),
     _PatternSpec(
@@ -61,6 +60,10 @@ _PATTERNS: tuple[_PatternSpec, ...] = (
 )
 
 
+_FENCE_LINE_RE = re.compile(r"^(\s{0,3})(`{3,}|~{3,})(.*)$")
+_FENCE_FALLBACK_RE = re.compile(r"(```|~~~)[\s\S]*?\1", re.MULTILINE)
+
+
 def _spans_overlap(a: Span, b: Span) -> bool:
     return not (a.end <= b.start or b.end <= a.start)
 
@@ -75,6 +78,66 @@ def _iter_pattern_spans(text: str) -> list[tuple[Span, int]]:
                     spec.priority,
                 )
             )
+    return out
+
+
+def _iter_code_block_spans(text: str) -> list[tuple[Span, int]]:
+    out: list[tuple[Span, int]] = []
+
+    lines = text.splitlines(keepends=True)
+    starts: list[int] = []
+    cursor = 0
+    for line in lines:
+        starts.append(cursor)
+        cursor += len(line)
+
+    i = 0
+    while i < len(lines):
+        raw_line = lines[i].rstrip("\r\n")
+        open_match = _FENCE_LINE_RE.match(raw_line)
+        if not open_match:
+            i += 1
+            continue
+
+        fence_char = open_match.group(2)[0]
+        fence_len = len(open_match.group(2))
+        block_start = starts[i]
+
+        j = i + 1
+        closed = False
+        while j < len(lines):
+            candidate = lines[j].rstrip("\r\n")
+            close_match = _FENCE_LINE_RE.match(candidate)
+            if (
+                close_match
+                and close_match.group(2)[0] == fence_char
+                and len(close_match.group(2)) >= fence_len
+                and close_match.group(3).strip() == ""
+            ):
+                block_end = starts[j] + len(lines[j])
+                out.append(
+                    (
+                        Span(
+                            block_start,
+                            block_end,
+                            "CODE_BLOCK",
+                            text[block_start:block_end],
+                        ),
+                        100,
+                    )
+                )
+                i = j + 1
+                closed = True
+                break
+            j += 1
+
+        if not closed:
+            i += 1
+            continue
+
+    for match in _FENCE_FALLBACK_RE.finditer(text):
+        out.append((Span(match.start(), match.end(), "CODE_BLOCK", match.group(0)), 98))
+
     return out
 
 
@@ -104,7 +167,8 @@ def _select_non_overlapping(candidates: list[tuple[Span, int]]) -> list[Span]:
 
 
 def detect_protected_spans(text: str, cfg: Config) -> list[Span]:
-    candidates = _iter_pattern_spans(text)
+    candidates = _iter_code_block_spans(text)
+    candidates.extend(_iter_pattern_spans(text))
     candidates.extend(_iter_negation_spans(text, cfg))
     return _select_non_overlapping(candidates)
 

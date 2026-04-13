@@ -11,3 +11,11 @@ def test_detects_core_spans() -> None:
     assert "CLI_FLAG" in labels
     assert "SEMVER" in labels
     assert "DATE" in labels
+
+
+def test_does_not_promote_sentence_words_to_identifier() -> None:
+    text = "Can you please explain this quickly? It is urgent."
+    spans = detect_protected_spans(text, Config())
+    values = {span.text for span in spans if span.label == "IDENTIFIER"}
+    assert "Can" not in values
+    assert "It" not in values

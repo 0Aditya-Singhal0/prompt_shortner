@@ -4,10 +4,10 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 
 from .config import Config
+from .protect import detect_protected_spans
 from .schemas import Span
 
 
-_CODE_BLOCK_RE = re.compile(r"(?ms)^(```|~~~)[^\n]*\n.*?^\1[ \t]*$", re.MULTILINE)
 _HEADING_RE = re.compile(r"^(#{1,6})\s+(.+)$", re.MULTILINE)
 _URL_RE = re.compile(r"https?://[^\s)\]>]+")
 _PATH_RE = re.compile(r"(?:[A-Za-z]:\\[^\s\"']+|(?:\./|\.\./|/)[A-Za-z0-9_./-]+)")
@@ -46,18 +46,19 @@ def _extract_headings(text: str) -> list[tuple[str, str]]:
     return [(level, title.strip()) for level, title in _HEADING_RE.findall(text)]
 
 
-def _structural_preserved(original: str, compressed: str) -> bool:
+def _extract_code_blocks(text: str, cfg: Config) -> list[str]:
+    spans = detect_protected_spans(text, cfg)
+    return [span.text for span in spans if span.label == "CODE_BLOCK"]
+
+
+def _structural_preserved(original: str, compressed: str, cfg: Config) -> bool:
     original_headings = _extract_headings(original)
     compressed_headings = _extract_headings(compressed)
     if original_headings and original_headings != compressed_headings:
         return False
 
-    original_code_blocks = [
-        match.group(0) for match in _CODE_BLOCK_RE.finditer(original)
-    ]
-    compressed_code_blocks = [
-        match.group(0) for match in _CODE_BLOCK_RE.finditer(compressed)
-    ]
+    original_code_blocks = _extract_code_blocks(original, cfg)
+    compressed_code_blocks = _extract_code_blocks(compressed, cfg)
     if original_code_blocks and original_code_blocks != compressed_code_blocks:
         return False
 
@@ -109,7 +110,7 @@ def verify(
 
     anchor_recall = _weighted_anchor_recall(compressed, anchors)
     negation_preserved = _negation_preserved(original, compressed, cfg)
-    structural_preserved = _structural_preserved(original, compressed)
+    structural_preserved = _structural_preserved(original, compressed, cfg)
     lexical_similarity = _lexical_similarity(original, compressed)
     lexical_ok = lexical_similarity >= cfg.lexical_sim_min
     budget_ok = True

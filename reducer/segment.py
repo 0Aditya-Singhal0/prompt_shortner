@@ -14,10 +14,6 @@ _KEY_VALUE_RE = re.compile(r"^\s*[A-Za-z0-9_.\-/][^:\n]{0,100}:\s+\S+")
 _SENTENCE_RE = re.compile(r"[^.!?\n]+(?:[.!?](?=\s|$))?")
 
 
-def _covered(start: int, end: int, intervals: list[tuple[int, int]]) -> bool:
-    return any(start >= left and end <= right for left, right in intervals)
-
-
 def _clause_guard(sentence: str) -> bool:
     if "`" in sentence:
         return True
@@ -72,6 +68,21 @@ def _line_offsets(text: str) -> list[tuple[int, str]]:
     if not offsets and text:
         offsets.append((0, text))
     return offsets
+
+
+def _non_code_regions(text: str, code_spans: list[Span]) -> list[tuple[int, int]]:
+    if not code_spans:
+        return [(0, len(text))] if text else []
+
+    regions: list[tuple[int, int]] = []
+    cursor = 0
+    for span in sorted(code_spans, key=lambda item: (item.start, item.end)):
+        if cursor < span.start:
+            regions.append((cursor, span.start))
+        cursor = max(cursor, span.end)
+    if cursor < len(text):
+        regions.append((cursor, len(text)))
+    return regions
 
 
 def _add_unit(
@@ -150,55 +161,73 @@ def segment(text: str, spans: list[Span], cfg: Config) -> list[Unit]:
             cfg,
         )
 
-    code_intervals = [(span.start, span.end) for span in code_spans]
-    paragraph_start: int | None = None
-    paragraph_end = 0
-
-    def flush_paragraph() -> None:
-        nonlocal paragraph_start, paragraph_end
-        if paragraph_start is None:
-            return
-        chunk = text[paragraph_start:paragraph_end]
-        _segment_paragraph(chunk, paragraph_start, units, spans, cfg)
-        paragraph_start = None
-
-    for line_start, line in _line_offsets(text):
-        line_end = line_start + len(line)
-        if _covered(line_start, line_end, code_intervals):
-            flush_paragraph()
+    for region_start, region_end in _non_code_regions(text, code_spans):
+        if region_start >= region_end:
             continue
 
-        bare = line.strip()
-        if not bare:
-            flush_paragraph()
-            continue
+        paragraph_start: int | None = None
+        paragraph_end = region_start
 
-        if _HEADING_RE.match(line):
-            flush_paragraph()
-            _add_unit(units, line, line_start, line_end, "SENTENCE", spans, cfg)
-            continue
-        if _LIST_RE.match(line):
-            flush_paragraph()
-            _add_unit(units, line, line_start, line_end, "LIST_ITEM", spans, cfg)
-            continue
-        if _QUOTE_RE.match(line):
-            flush_paragraph()
-            _add_unit(units, line, line_start, line_end, "QUOTE_BLOCK", spans, cfg)
-            continue
-        if _TABLE_RE.match(line) and line.count("|") >= 2:
-            flush_paragraph()
-            _add_unit(units, line, line_start, line_end, "KEY_VALUE_LINE", spans, cfg)
-            continue
-        if _KEY_VALUE_RE.match(line):
-            flush_paragraph()
-            _add_unit(units, line, line_start, line_end, "KEY_VALUE_LINE", spans, cfg)
-            continue
+        def flush_paragraph() -> None:
+            nonlocal paragraph_start, paragraph_end
+            if paragraph_start is None:
+                return
+            chunk = text[paragraph_start:paragraph_end]
+            _segment_paragraph(chunk, paragraph_start, units, spans, cfg)
+            paragraph_start = None
 
-        if paragraph_start is None:
-            paragraph_start = line_start
-        paragraph_end = line_end
+        chunk = text[region_start:region_end]
+        for rel_start, line in _line_offsets(chunk):
+            line_start = region_start + rel_start
+            line_end = line_start + len(line)
 
-    flush_paragraph()
+            bare = line.strip()
+            if not bare:
+                flush_paragraph()
+                continue
+
+            if _HEADING_RE.match(line):
+                flush_paragraph()
+                _add_unit(units, line, line_start, line_end, "SENTENCE", spans, cfg)
+                continue
+            if _LIST_RE.match(line):
+                flush_paragraph()
+                _add_unit(units, line, line_start, line_end, "LIST_ITEM", spans, cfg)
+                continue
+            if _QUOTE_RE.match(line):
+                flush_paragraph()
+                _add_unit(units, line, line_start, line_end, "QUOTE_BLOCK", spans, cfg)
+                continue
+            if _TABLE_RE.match(line) and line.count("|") >= 2:
+                flush_paragraph()
+                _add_unit(
+                    units,
+                    line,
+                    line_start,
+                    line_end,
+                    "KEY_VALUE_LINE",
+                    spans,
+                    cfg,
+                )
+                continue
+            if _KEY_VALUE_RE.match(line):
+                flush_paragraph()
+                _add_unit(
+                    units,
+                    line,
+                    line_start,
+                    line_end,
+                    "KEY_VALUE_LINE",
+                    spans,
+                    cfg,
+                )
+                continue
+
+            if paragraph_start is None:
+                paragraph_start = line_start
+            paragraph_end = line_end
+
+        flush_paragraph()
 
     units.sort(key=lambda unit: (unit.start, unit.end, unit.unit_id))
     deduped: list[Unit] = []
