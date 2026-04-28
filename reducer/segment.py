@@ -45,7 +45,7 @@ def _split_clauses(sentence: str) -> list[str]:
     for piece in first_pass:
         subparts = [
             x.strip()
-            for x in re.split(r"\s+(?:because|so|but|which|that|and)\s+", piece)
+            for x in re.split(r"\s+(?:because|so|but|which)\s+", piece)
             if x.strip()
         ]
         if len(subparts) <= 1:

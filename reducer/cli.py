@@ -3,7 +3,7 @@ import json
 from dataclasses import asdict
 
 from .config import Config
-from .pipeline import compress_prompt
+from .pipeline import compress_prompt, run_inference_pipeline
 
 
 def main() -> None:
@@ -18,6 +18,17 @@ def main() -> None:
         default="general",
     )
     parser.add_argument("--disable-output-normalizer", action="store_true")
+    parser.add_argument(
+        "--full-pipeline",
+        action="store_true",
+        help="Run compressed_input -> model -> normalize_output flow",
+    )
+    parser.add_argument(
+        "--mock-model-output",
+        type=str,
+        default="",
+        help="Mock model output text used when --full-pipeline is enabled",
+    )
     args = parser.parse_args()
 
     if args.input:
@@ -32,6 +43,16 @@ def main() -> None:
         domain=args.domain,
         use_output_normalizer=not args.disable_output_normalizer,
     )
+    if args.full_pipeline:
+        def _mock_model(_compressed_input: str) -> str:
+            if args.mock_model_output:
+                return args.mock_model_output
+            return _compressed_input
+
+        result = run_inference_pipeline(text, _mock_model, cfg)
+        print(json.dumps(asdict(result), indent=2))
+        return
+
     result = compress_prompt(text, cfg)
     print(json.dumps(asdict(result), indent=2))
 

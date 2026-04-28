@@ -1,3 +1,4 @@
+from functools import lru_cache
 import re
 
 import tiktoken
@@ -23,9 +24,13 @@ def shingle_set(tokens: list[str], k: int = 5) -> set[str]:
     return {" ".join(tokens[i : i + k]) for i in range(len(tokens) - k + 1)}
 
 
-def token_count(text: str, model: str = "gpt-4o-mini") -> int:
+@lru_cache(maxsize=16)
+def _encoding_for_model(model: str):
     try:
-        enc = tiktoken.encoding_for_model(model)
+        return tiktoken.encoding_for_model(model)
     except KeyError:
-        enc = tiktoken.get_encoding("cl100k_base")
-    return len(enc.encode(text))
+        return tiktoken.get_encoding("cl100k_base")
+
+
+def token_count(text: str, model: str = "gpt-4o-mini") -> int:
+    return len(_encoding_for_model(model).encode(text))

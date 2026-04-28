@@ -1,3 +1,5 @@
+from collections.abc import Callable
+
 from .anchors import extract_anchors
 from .config import Config
 from .dedupe import dedupe_units
@@ -6,7 +8,7 @@ from .normalize import normalize
 from .output_normalize import normalize_output
 from .protect import detect_protected_spans
 from .rewrite import rewrite_eligible, safe_rewrite
-from .schemas import CompressionResult, Unit
+from .schemas import CompressionResult, InferencePipelineResult, Unit
 from .segment import segment
 from .select import select_units
 from .tokenize import token_count
@@ -83,18 +85,14 @@ def _compress_once(
     units: list[Unit], cfg: Config, budget: int, over_budget_hard_keep: bool
 ) -> tuple[str, list[str]]:
     if over_budget_hard_keep:
-        assembled = _assemble(units)
-        normalized = normalize_output(assembled, cfg, cfg.output_keep_ratio())
-        return normalized, []
+        return _assemble(units), []
 
     rewritten_units, rewritten_ids = _apply_safe_rewrites(units, cfg)
     assembled = _assemble(rewritten_units)
-    normalized = normalize_output(assembled, cfg, cfg.output_keep_ratio())
-    if token_count(normalized, cfg.tokenizer_model) > budget:
+    if token_count(assembled, cfg.tokenizer_model) > budget:
         assembled = _assemble(units)
-        normalized = normalize_output(assembled, cfg, cfg.output_keep_ratio())
-        return normalized, []
-    return normalized, rewritten_ids
+        return assembled, []
+    return assembled, rewritten_ids
 
 
 def compress_prompt(text: str, cfg: Config | None = None) -> CompressionResult:
@@ -122,7 +120,6 @@ def compress_prompt(text: str, cfg: Config | None = None) -> CompressionResult:
 
     if not verification["passed"]:
         extracted_only = _assemble(selected)
-        extracted_only = normalize_output(extracted_only, cfg, cfg.output_keep_ratio())
         verification_no_rewrite = verify(
             original,
             extracted_only,
@@ -200,4 +197,23 @@ def compress_prompt(text: str, cfg: Config | None = None) -> CompressionResult:
         dropped_units=dropped_ids,
         rewritten_units=rewritten_ids,
         verification=verification,
+    )
+
+
+def run_inference_pipeline(
+    text: str,
+    model_fn: Callable[[str], str],
+    cfg: Config | None = None,
+) -> InferencePipelineResult:
+    effective_cfg = (cfg or Config()).for_domain()
+    compression = compress_prompt(text, effective_cfg)
+    raw_output = model_fn(compression.compressed_text)
+    normalized_output = normalize_output(
+        raw_output, effective_cfg, effective_cfg.output_keep_ratio()
+    )
+    return InferencePipelineResult(
+        compressed_input=compression.compressed_text,
+        raw_output=raw_output,
+        normalized_output=normalized_output,
+        compression=compression,
     )

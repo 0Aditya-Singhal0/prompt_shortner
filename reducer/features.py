@@ -40,6 +40,8 @@ _STOPWORD_SET = {
 }
 
 _HEDGE_SET = {"maybe", "perhaps", "possibly", "somewhat", "likely", "probably"}
+_HEAVY_FEATURE_UNIT_MIN = 3
+_HEAVY_FEATURE_TOKEN_MIN = 40
 
 
 def _minmax(values: list[float], eps: float) -> list[float]:
@@ -118,6 +120,13 @@ def _position_prior(unit: Unit, index: int, total: int) -> float:
     return 0.0
 
 
+def _should_use_heavy_features(tokenized_units: list[list[str]]) -> bool:
+    if len(tokenized_units) < _HEAVY_FEATURE_UNIT_MIN:
+        return False
+    total_tokens = sum(len(tokens) for tokens in tokenized_units)
+    return total_tokens >= _HEAVY_FEATURE_TOKEN_MIN
+
+
 def compute_features(
     units: list[Unit], anchors: dict[str, float], cfg: Config
 ) -> list[Unit]:
@@ -125,39 +134,46 @@ def compute_features(
         return units
 
     tokenized_units = [lexical_tokens(unit.text) for unit in units]
-    bm25 = BM25Okapi(tokenized_units)
+    use_heavy_features = _should_use_heavy_features(tokenized_units)
 
     query_terms: list[str] = []
     for anchor in anchors:
         query_terms.extend(lexical_tokens(anchor))
-    bm25_raw = (
-        bm25.get_scores(query_terms).tolist() if query_terms else [0.0] * len(units)
-    )
-    bm25_norm = _minmax(bm25_raw, cfg.epsilon)
+    if use_heavy_features and any(tokenized_units):
+        bm25 = BM25Okapi(tokenized_units)
+        bm25_raw = (
+            bm25.get_scores(query_terms).tolist() if query_terms else [0.0] * len(units)
+        )
+        bm25_norm = _minmax(bm25_raw, cfg.epsilon)
 
-    tfidf = TfidfVectorizer(lowercase=True, token_pattern=r"(?u)\b\w+\b")
-    try:
-        matrix = tfidf.fit_transform([unit.text for unit in units])
-        similarity = cosine_similarity(matrix)
-    except ValueError:
-        similarity = [[0.0 for _ in units] for _ in units]
+        tfidf = TfidfVectorizer(lowercase=True, token_pattern=r"(?u)\b\w+\b")
+        try:
+            matrix = tfidf.fit_transform([unit.text for unit in units])
+            similarity = cosine_similarity(matrix)
+        except ValueError:
+            similarity = [[0.0 for _ in units] for _ in units]
 
-    graph = nx.Graph()
-    graph.add_nodes_from(range(len(units)))
-    for left in range(len(units)):
-        for right in range(left + 1, len(units)):
-            weight = (
-                similarity[left][right]
-                if isinstance(similarity, list)
-                else similarity[left, right]
-            )
-            if weight <= 0:
-                continue
-            graph.add_edge(left, right, weight=float(weight))
-    centrality_raw = nx.pagerank(graph, weight="weight") if len(units) > 1 else {0: 1.0}
-    centrality_norm = _minmax(
-        [centrality_raw.get(i, 0.0) for i in range(len(units))], cfg.epsilon
-    )
+        graph = nx.Graph()
+        graph.add_nodes_from(range(len(units)))
+        for left in range(len(units)):
+            for right in range(left + 1, len(units)):
+                weight = (
+                    similarity[left][right]
+                    if isinstance(similarity, list)
+                    else similarity[left, right]
+                )
+                if weight <= 0:
+                    continue
+                graph.add_edge(left, right, weight=float(weight))
+        centrality_raw = (
+            nx.pagerank(graph, weight="weight") if len(units) > 1 else {0: 1.0}
+        )
+        centrality_norm = _minmax(
+            [centrality_raw.get(i, 0.0) for i in range(len(units))], cfg.epsilon
+        )
+    else:
+        bm25_norm = [0.0 for _ in units]
+        centrality_norm = [0.0 for _ in units]
 
     ranked_anchor_terms = [
         item[0]

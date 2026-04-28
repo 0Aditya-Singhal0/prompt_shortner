@@ -1,3 +1,4 @@
+from collections import Counter
 import re
 
 from sklearn.feature_extraction.text import TfidfVectorizer
@@ -13,8 +14,40 @@ _URL_RE = re.compile(r"https?://[^\s)\]>]+")
 _PATH_RE = re.compile(r"(?:[A-Za-z]:\\[^\s\"']+|(?:\./|\.\./|/)[A-Za-z0-9_./-]+)")
 
 
-def _contains_exact(text: str, span: Span) -> bool:
-    return span.text in text
+def _literal_occurrences(text: str, literal: str) -> int:
+    if not literal:
+        return 0
+    return len(re.findall(re.escape(literal), text))
+
+
+def _matched_span_count(text: str, spans: list[Span]) -> int:
+    if not spans:
+        return 0
+    required = Counter(span.text for span in spans)
+    available = {
+        literal: _literal_occurrences(text, literal)
+        for literal in required
+        if literal
+    }
+    return sum(min(count, available.get(literal, 0)) for literal, count in required.items())
+
+
+def _all_spans_preserved(text: str, spans: list[Span]) -> bool:
+    return _matched_span_count(text, spans) == len(spans)
+
+
+def _regex_occurrences(text: str, pattern: re.Pattern[str]) -> Counter[str]:
+    return Counter(match.group(0) for match in pattern.finditer(text))
+
+
+def _regex_occurrences_preserved(
+    original: str, compressed: str, pattern: re.Pattern[str]
+) -> bool:
+    required = _regex_occurrences(original, pattern)
+    if not required:
+        return True
+    available = _regex_occurrences(compressed, pattern)
+    return all(available.get(value, 0) >= count for value, count in required.items())
 
 
 def _weighted_anchor_recall(compressed: str, anchors: dict[str, float]) -> float:
@@ -71,10 +104,10 @@ def _structural_preserved(original: str, compressed: str, cfg: Config) -> bool:
         if not any(keyword in compressed.lower() for keyword in output_keywords):
             return False
 
-    if set(_URL_RE.findall(original)) - set(_URL_RE.findall(compressed)):
+    if not _regex_occurrences_preserved(original, compressed, _URL_RE):
         return False
 
-    if set(_PATH_RE.findall(original)) - set(_PATH_RE.findall(compressed)):
+    if not _regex_occurrences_preserved(original, compressed, _PATH_RE):
         return False
 
     return True
@@ -97,16 +130,14 @@ def verify(
     token_budget: int | None = None,
 ) -> dict:
     protected_total = len(spans)
-    protected_kept = sum(_contains_exact(compressed, span) for span in spans)
+    protected_kept = _matched_span_count(compressed, spans)
     protected_coverage = (
         1.0 if protected_total == 0 else protected_kept / protected_total
     )
 
     numeric_labels = {"NUMBER", "DATE", "TIME", "SEMVER", "FILE_PATH"}
     numeric_spans = [span for span in spans if span.label in numeric_labels]
-    numeric_coverage = (
-        1.0 if all(_contains_exact(compressed, span) for span in numeric_spans) else 0.0
-    )
+    numeric_coverage = 1.0 if _all_spans_preserved(compressed, numeric_spans) else 0.0
 
     anchor_recall = _weighted_anchor_recall(compressed, anchors)
     negation_preserved = _negation_preserved(original, compressed, cfg)

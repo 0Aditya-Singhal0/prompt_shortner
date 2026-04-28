@@ -1,10 +1,14 @@
 from dataclasses import dataclass, field, replace
 
 
+_DEFAULT_TARGET_REDUCTION = 0.30
+_DEFAULT_KEEP_RATIO = 0.70
+
+
 @dataclass
 class Config:
-    target_reduction: float = 0.30
-    keep_ratio: float = 0.70
+    target_reduction: float = _DEFAULT_TARGET_REDUCTION
+    keep_ratio: float = _DEFAULT_KEEP_RATIO
     keep_ratio_min: float = 0.65
     keep_ratio_max: float = 0.85
     strict_mode: bool = False
@@ -16,6 +20,9 @@ class Config:
     rewrite_protected_mass_max: float = 0.15
     dedupe_hard: float = 0.85
     dedupe_soft: float = 0.70
+    use_minhash_dedupe: bool = True
+    minhash_num_perm: int = 64
+    minhash_filter_margin: float = 0.08
     shingle_size: int = 5
     mmr_lambda: float = 0.72
     anchor_recall_min: float = 0.90
@@ -32,6 +39,8 @@ class Config:
     output_fragment_allow_threshold: float = 0.78
     output_risk_bypass_threshold: float = 0.35
     output_protected_mass_bypass: float = 0.40
+    output_use_pos_pruning: bool = True
+    output_use_dependency_pruning: bool = True
     use_output_normalizer: bool = True
 
     raw_score_weights: dict[str, float] = field(
@@ -136,6 +145,25 @@ class Config:
         "additionally",
     )
 
+    output_prunable_adjectives: tuple[str, ...] = (
+        "helpful",
+        "quick",
+        "simple",
+        "easy",
+        "nice",
+    )
+
+    def __post_init__(self) -> None:
+        target_changed = (
+            abs(self.target_reduction - _DEFAULT_TARGET_REDUCTION) > self.epsilon
+        )
+        keep_changed = abs(self.keep_ratio - _DEFAULT_KEEP_RATIO) > self.epsilon
+        if target_changed and not keep_changed:
+            self.keep_ratio = 1.0 - self.target_reduction
+
+        self.keep_ratio = min(max(self.keep_ratio, 0.0), 1.0)
+        self.target_reduction = round(1.0 - self.keep_ratio, 4)
+
     def with_keep_ratio(self, keep_ratio: float) -> "Config":
         keep_ratio = min(max(keep_ratio, self.keep_ratio_min), self.keep_ratio_max)
         return replace(self, keep_ratio=keep_ratio)
@@ -149,6 +177,13 @@ class Config:
                 self,
                 keep_ratio=max(self.keep_ratio, 0.78),
                 anchor_recall_min=max(self.anchor_recall_min, 0.95),
+            )
+        if self.domain == "data":
+            return replace(
+                self,
+                keep_ratio=max(self.keep_ratio, 0.80),
+                anchor_recall_min=max(self.anchor_recall_min, 0.93),
+                rewrite_protected_mass_max=min(self.rewrite_protected_mass_max, 0.10),
             )
         if self.domain == "legal_like":
             return replace(

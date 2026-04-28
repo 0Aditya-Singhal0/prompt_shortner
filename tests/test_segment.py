@@ -39,3 +39,13 @@ def test_inline_fence_start_does_not_create_fake_sentence_unit() -> None:
         unit.unit_type != "CODE_BLOCK" and unit.text.strip().startswith("```")
         for unit in units
     )
+
+
+def test_does_not_split_sentence_only_on_conjunctions() -> None:
+    text = "Explain setup and configuration and deployment."
+    cfg = Config()
+    spans = detect_protected_spans(text, cfg)
+    units = segment(text, spans, cfg)
+    non_code = [unit for unit in units if unit.unit_type != "CODE_BLOCK"]
+    assert len(non_code) == 1
+    assert non_code[0].unit_type == "SENTENCE"

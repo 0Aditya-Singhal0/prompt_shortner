@@ -1,4 +1,7 @@
+from functools import lru_cache
 import re
+
+import nltk
 
 from .config import Config
 from .protect import detect_protected_spans
@@ -7,6 +10,106 @@ from .tokenize import lexical_tokens
 
 
 _PLACEHOLDER_RE = re.compile(r"__P\d+__")
+_URL_RE = re.compile(r"https?://[^\s)\]>]+")
+_PATH_RE = re.compile(r"(?:[A-Za-z]:\\[^\s\"']+|(?:\./|\.\./|/)[A-Za-z0-9_./-]+)")
+_PAREN_RE = re.compile(r"\(([^()]+)\)")
+_LEADING_SUBORDINATE_RE = re.compile(
+    r"^\s*(?:because|since|although|while|if)\b[^,]{0,120},\s*(.+)$",
+    re.IGNORECASE,
+)
+_PRUNABLE_PAREN_HINTS = (
+    "for example",
+    "e.g.",
+    "i think",
+    "usually",
+    "generally",
+    "maybe",
+    "probably",
+)
+_POS_DROP_TAGS = {"RB", "RBR", "RBS"}
+_ADJECTIVE_TAGS = {"JJ", "JJR", "JJS"}
+_DISCOURSE_HEADS = {"however", "therefore", "additionally", "moreover"}
+
+
+@lru_cache(maxsize=1)
+def _pos_tagger_available() -> bool:
+    tagger_paths = (
+        "taggers/averaged_perceptron_tagger_eng",
+        "taggers/averaged_perceptron_tagger",
+    )
+    for path in tagger_paths:
+        try:
+            nltk.data.find(path)
+            return True
+        except LookupError:
+            continue
+    return False
+
+
+def _pos_tag_tokens(text: str) -> list[tuple[str, str]]:
+    tokens = nltk.tokenize.wordpunct_tokenize(text)
+    if not tokens:
+        return []
+    if not _pos_tagger_available():
+        return [(token, "") for token in tokens]
+    try:
+        return [(token, tag) for token, tag in nltk.pos_tag(tokens)]
+    except LookupError:
+        return [(token, "") for token in tokens]
+
+
+def _join_tokens(tokens: list[str]) -> str:
+    if not tokens:
+        return ""
+    out = " ".join(tokens)
+    out = re.sub(r"\s+([,.;:!?])", r"\1", out)
+    out = re.sub(r"([([{])\s+", r"\1", out)
+    out = re.sub(r"\s+([)\]}])", r"\1", out)
+    return out.strip()
+
+
+def _prune_by_pos(text: str, cfg: Config) -> str:
+    if not cfg.output_use_pos_pruning:
+        return text
+    tagged = _pos_tag_tokens(text)
+    if not tagged:
+        return text
+
+    modifiers = set(cfg.output_prunable_modifiers)
+    adjectives = set(cfg.output_prunable_adjectives)
+    negations = {item.lower() for item in cfg.negation_lexicon}
+    kept: list[str] = []
+    for token, tag in tagged:
+        lower = token.lower()
+        if lower in negations:
+            kept.append(token)
+            continue
+        if tag in _POS_DROP_TAGS and lower in modifiers:
+            continue
+        if tag in _ADJECTIVE_TAGS and lower in adjectives:
+            continue
+        if lower in _DISCOURSE_HEADS and tag in _POS_DROP_TAGS | {"CC"}:
+            continue
+        kept.append(token)
+    return _join_tokens(kept)
+
+
+def _prune_by_dependency(text: str, cfg: Config) -> str:
+    if not cfg.output_use_dependency_pruning:
+        return text
+
+    out = re.sub(
+        r"^\s*(?:however|therefore|additionally|moreover)\s*,?\s*",
+        "",
+        text,
+        flags=re.IGNORECASE,
+    )
+    match = _LEADING_SUBORDINATE_RE.match(out)
+    if match:
+        candidate = match.group(1).strip()
+        if candidate:
+            out = candidate
+    return out.strip()
 
 
 def detect_protected_output_spans(text: str, cfg: Config) -> list[Span]:
@@ -53,9 +156,31 @@ def discourse_fluff_score(sentence: str, cfg: Config) -> float:
     return 0.45 * hedge_density + 0.35 * pleasantry_density + 0.20 * meta_density
 
 
+def _clause_guard(sentence: str, cfg: Config) -> bool:
+    lower = sentence.lower()
+    if _PLACEHOLDER_RE.search(sentence):
+        return True
+    if "`" in sentence:
+        return True
+    if _URL_RE.search(sentence):
+        return True
+    if _PATH_RE.search(sentence):
+        return True
+    if re.search(r'"[^"\n]+"|\'[^\'\n]+\'', sentence):
+        return True
+    if len(re.findall(r"\b\d+(?:\.\d+)?\b", sentence)) >= 2:
+        return True
+    if any(term in lower for term in cfg.negation_lexicon):
+        return True
+    return False
+
+
 def split_into_clauses(sentence: str, spans: list[Span], cfg: Config) -> list[str]:
     del spans
-    del cfg
+    if _clause_guard(sentence, cfg):
+        stripped = sentence.strip()
+        return [stripped] if stripped else [sentence]
+
     clauses = [sentence]
 
     first_pass: list[str] = []
@@ -72,17 +197,47 @@ def split_into_clauses(sentence: str, spans: list[Span], cfg: Config) -> list[st
     for chunk in first_pass:
         pieces = [
             piece.strip()
-            for piece in re.split(r"\s+(?:because|so|but|which|that)\s+", chunk)
+            for piece in re.split(r"\s+(?:because|so|but|which)\s+", chunk)
             if piece.strip()
         ]
         if len(pieces) <= 1:
             second_pass.append(chunk)
             continue
-        if all(len(piece.split()) >= 3 for piece in pieces):
+        if all(len(piece.split()) >= 4 for piece in pieces):
             second_pass.extend(pieces)
         else:
             second_pass.append(chunk)
     return second_pass if second_pass else [sentence]
+
+
+def _parenthetical_is_prunable(content: str, cfg: Config) -> bool:
+    inner = content.strip()
+    if not inner:
+        return True
+
+    lower = inner.lower()
+    if _PLACEHOLDER_RE.search(inner):
+        return False
+    if _URL_RE.search(inner) or _PATH_RE.search(inner):
+        return False
+    if re.search(r"\d", inner):
+        return False
+    if re.search(r"(?:<=|>=|==|!=|=>|->)", inner):
+        return False
+    if any(term in lower for term in cfg.negation_lexicon):
+        return False
+    if any(hint in lower for hint in _PRUNABLE_PAREN_HINTS):
+        return True
+    return len(inner.split()) <= 2
+
+
+def _prune_parentheticals(text: str, cfg: Config) -> str:
+    return _PAREN_RE.sub(
+        lambda match: ""
+        if _parenthetical_is_prunable(match.group(1), cfg)
+        else match.group(0),
+        text,
+    )
 
 
 def prune_clause(clause: str, spans: list[Span], cfg: Config) -> str:
@@ -91,7 +246,9 @@ def prune_clause(clause: str, spans: list[Span], cfg: Config) -> str:
     for pattern in cfg.output_fluff_patterns:
         text = re.sub(pattern, "", text)
 
-    text = re.sub(r"\([^)]*\)", "", text)
+    text = _prune_parentheticals(text, cfg)
+    text = _prune_by_dependency(text, cfg)
+    text = _prune_by_pos(text, cfg)
     modifier_pattern = (
         r"\b(?:"
         + "|".join(re.escape(term) for term in cfg.output_prunable_modifiers)

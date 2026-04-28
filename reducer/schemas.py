@@ -36,3 +36,11 @@ class CompressionResult:
     dropped_units: list[str]
     rewritten_units: list[str]
     verification: dict[str, Any]
+
+
+@dataclass
+class InferencePipelineResult:
+    compressed_input: str
+    raw_output: str
+    normalized_output: str
+    compression: CompressionResult
